@@ -25,6 +25,10 @@ export default function DriverPage() {
         <span className="spacer" />
         <button className="danger" onClick={runAudit}>执行回收审计（漏扫/爽约/逾期）</button>
       </div>
+      <div className="muted small" style={{ marginBottom: 12 }}>
+        已到店但酒吧没把空桶备好时，请登记「酒吧未备好空桶」——该到场记录会作为逾期责任判定依据；
+        若预约已登记"酒吧未备货"，事后空桶备好仍可正常扫码收回。
+      </div>
       {audit && (audit.missing_scans.length > 0 || audit.missed_reservations > 0) && (
         <div className="panel" style={{ borderColor: '#e0b3aa', background: '#fdf3f1' }}>
           <h3>审计结果</h3>
@@ -53,6 +57,8 @@ function TaskCard({ t, onChange }) {
   const [residue, setResidue] = useState('无')
   const [cap, setCap] = useState('已封盖')
   const [busy, setBusy] = useState(false)
+  const [visitOpen, setVisitOpen] = useState(false)
+  const [visitNote, setVisitNote] = useState('')
 
   const scan = async () => {
     if (!code.trim()) { toast('请输入/扫描桶编号', 'err'); return }
@@ -68,6 +74,19 @@ function TaskCard({ t, onChange }) {
     } catch (e) { toast(e.message, 'err') } finally { setBusy(false) }
   }
 
+  const reportNotReady = async () => {
+    try {
+      await api('/pickups/visit', {
+        method: 'POST',
+        body: { reservation_id: t.reservation_id, result: 'BAR_NOT_READY', note: visitNote }
+      })
+      toast('已登记到场记录：酒吧未备好空桶，逾期责任将倾向酒吧')
+      setVisitOpen(false); setVisitNote('')
+      onChange()
+    } catch (e) { toast(e.message, 'err') }
+  }
+
+  const abnormal = t.status === 'BAR_NOT_READY' || t.status === 'DRIVER_FAILED' || t.status === 'MISSED'
   const allScanned = t.cycles.length > 0 && t.scanned_count === t.cycles.length
 
   return (
@@ -76,6 +95,7 @@ function TaskCard({ t, onChange }) {
         <div>
           <h2 style={{ margin: 0 }}>{t.bar} <span className="muted small">{t.city}</span></h2>
           <div className="small muted">预约日 {t.pickup_date} · 应收 {t.empty_count} 只 · {t.note || '无备注'}</div>
+          {abnormal && t.visit_note && <div className="small" style={{ color: 'var(--danger)', marginTop: 4 }}>到场记录：{t.visit_note}（{t.visited_at}）</div>}
         </div>
         <span className="spacer" />
         <Badge map={RES_STATUS} value={t.status} />
@@ -100,29 +120,43 @@ function TaskCard({ t, onChange }) {
         </table>
       </div>
 
-      {!allScanned && (
-        <div className="grid cols-4" style={{ marginTop: 12, alignItems: 'flex-end' }}>
-          <div><label>扫码/输入桶编号</label>
-            <input value={code} onChange={e => setCode(e.target.value)} placeholder="KEG-0003"
-              onKeyDown={e => e.key === 'Enter' && scan()} autoFocus /></div>
-          <div><label>外观</label>
-            <select value={appearance} onChange={e => setAppearance(e.target.value)}>
-              <option>完好</option><option>凹陷</option><option>变形</option><option>锈蚀</option>
-            </select></div>
-          <div><label>残液</label>
-            <select value={residue} onChange={e => setResidue(e.target.value)}>
-              <option>无</option><option>少量</option><option>明显残液</option>
-            </select></div>
-          <div><label>封盖</label>
-            <select value={cap} onChange={e => setCap(e.target.value)}>
-              <option>已封盖</option><option>未封盖</option><option>封盖损坏</option>
-            </select></div>
+      {t.status !== 'PICKED' && !allScanned && (
+        <div className="row end" style={{ marginTop: 10 }}>
+          {!visitOpen
+            ? <button className="small danger" style={{ marginRight: 8 }}
+                onClick={() => setVisitOpen(true)}>已到店但酒吧未备好空桶</button>
+            : <div className="row" style={{ flex: 1 }}>
+                <input style={{ flex: 1 }} value={visitNote} onChange={e => setVisitNote(e.target.value)}
+                  placeholder="到场情况，如：店长称桶还在卖/空桶没整理，让改日再来" />
+                <button className="small danger" onClick={reportNotReady}>确认登记</button>
+                <button className="small subtle" onClick={() => setVisitOpen(false)}>取消</button>
+              </div>}
         </div>
       )}
+
       {!allScanned && (
-        <div className="row end" style={{ marginTop: 10 }}>
-          <button disabled={busy} onClick={scan}>确认空数量并扫码回收</button>
-        </div>
+        <>
+          <div className="grid cols-4" style={{ marginTop: 12, alignItems: 'flex-end' }}>
+            <div><label>扫码/输入桶编号</label>
+              <input value={code} onChange={e => setCode(e.target.value)} placeholder="KEG-0003"
+                onKeyDown={e => e.key === 'Enter' && scan()} autoFocus /></div>
+            <div><label>外观</label>
+              <select value={appearance} onChange={e => setAppearance(e.target.value)}>
+                <option>完好</option><option>凹陷</option><option>变形</option><option>锈蚀</option>
+              </select></div>
+            <div><label>残液</label>
+              <select value={residue} onChange={e => setResidue(e.target.value)}>
+                <option>无</option><option>少量</option><option>明显残液</option>
+              </select></div>
+            <div><label>封盖</label>
+              <select value={cap} onChange={e => setCap(e.target.value)}>
+                <option>已封盖</option><option>未封盖</option><option>封盖损坏</option>
+              </select></div>
+          </div>
+          <div className="row end" style={{ marginTop: 10 }}>
+            <button disabled={busy} onClick={scan}>确认空数量并扫码回收</button>
+          </div>
+        </>
       )}
     </div>
   )

@@ -145,8 +145,13 @@ func handleOverview(w http.ResponseWriter, r *http.Request) {
 	// 预警：账期逾期未闭环
 	out["overdue"] = count(`SELECT count(*) FROM keg_cycles
 		WHERE deposit_due_date < CURRENT_DATE AND stage NOT IN ('WASHED','FAILED')`)
+	// 预警：逾期冻结中（待责任判定）
+	out["deposit_frozen_pending"] = count(`SELECT count(*) FROM keg_cycles
+		WHERE deposit_status='FROZEN' AND overdue_responsibility='PENDING'`)
 	// 预警：司机漏扫
 	out["missing_scan"] = count(`SELECT count(*) FROM keg_cycles WHERE missing_scan`)
+	// 预警：有司机到店失败记录（逾期责任倾向司机）
+	out["driver_failed_visits"] = count(`SELECT count(DISTINCT cycle_id) FROM driver_visits WHERE result='DRIVER_FAILED'`)
 	// 预警：清洗不合格
 	out["wash_fail"] = count(`SELECT count(*) FROM kegs WHERE asset_status='WASH_FAIL'`)
 	// 预警：丢失

@@ -145,26 +145,30 @@ func handleKegTrace(w http.ResponseWriter, r *http.Request) {
 
 	current := M{}
 	var cid, batchID, barID, driverID, orderID sql.NullInt64
-	var stage, depositStatus, receiver, reason sql.NullString
+	var stage, depositStatus, receiver, reason, responsibility, frozenAt, releaseDate string
 	var deposit, released, deducted float64
 	var dueDate sql.NullTime
 	var late, missing, lost, deformed bool
 	err = db.QueryRow(`SELECT id, batch_id, bar_id, driver_id, order_id, stage,
 		deposit_amount, deposit_due_date, deposit_status, released_amount, deducted_amount,
-		COALESCE(deduct_reason,''), COALESCE(bar_receiver,''), late_return, missing_scan, lost, deformed
+		COALESCE(deduct_reason,''), COALESCE(bar_receiver,''), late_return, missing_scan, lost, deformed,
+		COALESCE(overdue_responsibility,'PENDING'), COALESCE(text(deposit_frozen_at),''),
+		COALESCE(text(deposit_release_date),'')
 		FROM keg_cycles WHERE keg_id=$1 ORDER BY id DESC LIMIT 1`, kegID).
 		Scan(&cid, &batchID, &barID, &driverID, &orderID, &stage,
 			&deposit, &dueDate, &depositStatus, &released, &deducted, &reason, &receiver,
-			&late, &missing, &lost, &deformed)
+			&late, &missing, &lost, &deformed, &responsibility, &frozenAt, &releaseDate)
 	if err == nil {
 		current = M{
 			"cycle_id": cid.Int64, "batch_id": batchID.Int64, "bar_id": barID.Int64,
-			"driver_id": driverID.Int64, "order_id": orderID.Int64, "stage": stage.String,
+			"driver_id": driverID.Int64, "order_id": orderID.Int64, "stage": stage,
 			"deposit_amount": deposit, "deposit_due_date": dateStr(dueDate),
-			"deposit_status": depositStatus.String, "released_amount": released,
-			"deducted_amount": deducted, "deduct_reason": reason.String,
-			"bar_receiver": receiver.String,
+			"deposit_status": depositStatus, "released_amount": released,
+			"deducted_amount": deducted, "deduct_reason": reason,
+			"bar_receiver": receiver,
 			"late_return":  late, "missing_scan": missing, "lost": lost, "deformed": deformed,
+			"overdue_responsibility": responsibility,
+			"deposit_frozen_at":      frozenAt, "deposit_release_date": releaseDate,
 		}
 		var batchNo, beerStyle, beerName, barName string
 		_ = db.QueryRow(`SELECT ba.batch_no, be.style, be.name FROM batches ba JOIN beers be ON be.id=ba.beer_id WHERE ba.id=$1`, batchID.Int64).

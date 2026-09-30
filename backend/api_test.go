@@ -362,6 +362,204 @@ func TestEndToEnd(t *testing.T) {
 	})
 }
 
+// ---------- 空桶逾期押金冻结全链路 ----------
+
+func TestOverdueFreezeFlow(t *testing.T) {
+	if err := resetTestDB(); err != nil {
+		t.Fatal(err)
+	}
+	admin := login(t, "admin")
+	finance := login(t, "finance")
+	bar2 := login(t, "bar2") // 醉猫酒馆 id=5
+	bar1 := login(t, "bar1")
+	driver1 := login(t, "driver1")
+
+	const png1px = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+	t.Run("批量冻结逾期桶并产生催还提醒", func(t *testing.T) {
+		// 冻结前 905/906 均为 HELD 且账期 2026-09-15 已过
+		code, d := doJSON(t, "POST", "/api/finance/freeze-overdue", finance, M{})
+		mustOK(t, code, d, "冻结全部逾期桶")
+		frozen := d["frozen"].([]interface{})
+		codes := map[string]bool{}
+		for _, x := range frozen {
+			codes[x.(map[string]interface{})["keg_code"].(string)] = true
+		}
+		if !codes["KEG-0005"] || !codes["KEG-0006"] {
+			t.Fatalf("905/906 逾期桶应被冻结: %v", codes)
+		}
+		if codes["KEG-0001"] {
+			t.Fatalf("未逾期的 KEG-0001 不应被冻结")
+		}
+		// 幂等：再次执行不应重复冻结/重复提醒
+		code, d2 := doJSON(t, "POST", "/api/finance/freeze-overdue", finance, M{})
+		mustOK(t, code, d2, "重复冻结")
+		if d2["count"].(float64) != 0 {
+			t.Fatalf("重复执行不应新增冻结: %v", d2)
+		}
+
+		// 店长收到桶级催还提醒，别的酒吧看不到
+		_, da := doJSON(t, "GET", "/api/bar/alerts", bar2, nil)
+		saw := false
+		for _, x := range da["alerts"].([]interface{}) {
+			m := x.(map[string]interface{})
+			if m["kind"] == "OVERDUE_FREEZE" && m["keg_code"] == "KEG-0005" {
+				saw = true
+			}
+		}
+		if !saw {
+			t.Fatalf("醉猫酒馆应收到 KEG-0005 冻结催还提醒")
+		}
+		_, d1 := doJSON(t, "GET", "/api/bar/alerts", bar1, nil)
+		for _, x := range d1["alerts"].([]interface{}) {
+			if x.(map[string]interface{})["keg_code"] == "KEG-0005" {
+				t.Fatalf("泡沫实验室不应看到醉猫的桶级提醒")
+			}
+		}
+	})
+
+	t.Run("店长上传已打空照片与权限校验", func(t *testing.T) {
+		// 跨店上传被拒
+		code, d := doJSON(t, "POST", "/api/cycles/proofs/905", bar1,
+			M{"photo_data": png1px, "note": "别家店"})
+		if code != 400 {
+			t.Fatalf("跨店上传照片应 400, 实际 %d %v", code, d)
+		}
+		// 非图片数据被拒
+		code, _ = doJSON(t, "POST", "/api/cycles/proofs/905", bar2,
+			M{"photo_data": "not-an-image"})
+		if code != 400 {
+			t.Fatalf("非图片照片应 400, 实际 %d", code)
+		}
+		code, d = doJSON(t, "POST", "/api/cycles/proofs/905", bar2,
+			M{"photo_data": png1px, "note": "KEG-0005 实际已打空，司机 9/20 到店时桶在角落没找到"})
+		mustOK(t, code, d, "上传现场照片")
+		// 财务可查看凭证（照片 + 805 到场记录）
+		code, d = doJSON(t, "GET", "/api/cycles/proofs/905", finance, nil)
+		mustOK(t, code, d, "查看凭证")
+		if len(d["proofs"].([]interface{})) != 1 {
+			t.Fatalf("905 应有 1 张照片: %v", d["proofs"])
+		}
+		visits := d["visits"].([]interface{})
+		if len(visits) != 1 || visits[0].(map[string]interface{})["result"] != "BAR_NOT_READY" {
+			t.Fatalf("905 应带 1 条酒吧未备货到场记录: %v", visits)
+		}
+	})
+
+	t.Run("未判定责任前拒绝结算冻结押金", func(t *testing.T) {
+		code, d := doJSON(t, "POST", "/api/finance/settle/905", finance, M{"action": "release"})
+		if code != 400 || !strings.Contains(d["error"].(string), "责任判定") {
+			t.Fatalf("冻结未定则结算应拒绝: %d %v", code, d)
+		}
+	})
+
+	t.Run("酒吧未备货责任-维持冻结可扣款", func(t *testing.T) {
+		code, d := doJSON(t, "POST", "/api/finance/responsibility/905", finance,
+			M{"responsibility": "BAR", "note": "司机已到店，空桶未备好，责任在酒吧"})
+		mustOK(t, code, d, "判定酒吧责任")
+		if d["deposit_status"] != "FROZEN" || d["overdue_responsibility"] != "BAR" {
+			t.Fatalf("酒吧责任应维持冻结: %v", d)
+		}
+		// 定则后可结算：部分扣款
+		code, d = doJSON(t, "POST", "/api/finance/settle/905", finance,
+			M{"action": "partial", "deduct_amount": 100, "reason": "逾期责任酒吧承担，扣款 100"})
+		mustOK(t, code, d, "酒吧责任后部分扣款")
+		if d["deducted_amount"].(float64) != 100 || d["released_amount"].(float64) != 600 {
+			t.Fatalf("扣款金额错误: %v", d)
+		}
+	})
+
+	t.Run("司机到店失败责任-解冻并重算释放时间", func(t *testing.T) {
+		// 种子 806/917 已存在 DRIVER_FAILED 到场记录
+		code, d := doJSON(t, "GET", "/api/cycles/proofs/917", finance, nil)
+		mustOK(t, code, d, "917 凭证")
+		visits := d["visits"].([]interface{})
+		if len(visits) != 1 || visits[0].(map[string]interface{})["result"] != "DRIVER_FAILED" {
+			t.Fatalf("917 应有司机到店失败记录: %v", visits)
+		}
+		// 店长确认回收时间（改约 806 为未来日期）
+		code, d = doJSON(t, "POST", "/api/cycles/confirm-pickup", bar2,
+			M{"cycle_id": 917, "reservation_id": 806, "pickup_date": "2026-10-02", "note": "空桶已备好"})
+		mustOK(t, code, d, "店长确认回收时间")
+		if d["reservation_id"].(float64) != 806 {
+			t.Fatalf("应改约 806: %v", d)
+		}
+		// 非本店店长不能确认
+		code, _ = doJSON(t, "POST", "/api/cycles/confirm-pickup", bar1,
+			M{"cycle_id": 917, "pickup_date": "2026-10-02"})
+		if code != 400 {
+			t.Fatalf("跨店确认回收时间应 400, 实际 %d", code)
+		}
+		// 判定司机责任 → 解冻，释放日 = 确认回收日 + 7
+		code, d = doJSON(t, "POST", "/api/finance/responsibility/917", finance,
+			M{"responsibility": "DRIVER", "note": "司机失约，酒吧无责"})
+		mustOK(t, code, d, "判定司机责任")
+		if d["deposit_status"] != "HELD" {
+			t.Fatalf("司机责任应解除冻结为 HELD: %v", d)
+		}
+		if d["deposit_release_date"] != "2026-10-09" {
+			t.Fatalf("释放日应按确认回收日 2026-10-02 +7 重算为 2026-10-09: %v", d["deposit_release_date"])
+		}
+		// 解冻后可正常释放
+		code, d = doJSON(t, "POST", "/api/finance/settle/917", finance, M{"action": "release"})
+		mustOK(t, code, d, "司机责任后释放押金")
+		if d["released_amount"].(float64) != 700 {
+			t.Fatalf("应全额释放 700: %v", d)
+		}
+		// 店长收到责任结论提醒
+		_, da := doJSON(t, "GET", "/api/bar/alerts", bar2, nil)
+		saw := false
+		for _, x := range da["alerts"].([]interface{}) {
+			m := x.(map[string]interface{})
+			if m["kind"] == "RESPONSIBILITY" && m["keg_code"] == "KEG-0017" {
+				saw = true
+			}
+		}
+		if !saw {
+			t.Fatalf("店长应收到 KEG-0017 责任判定提醒")
+		}
+	})
+
+	t.Run("司机登记酒吧未备好空桶到场记录", func(t *testing.T) {
+		// 801 是泡沫实验室(4)的预约，driver1 在上海，可登记
+		code, d := doJSON(t, "POST", "/api/pickups/visit", driver1,
+			M{"reservation_id": 801, "result": "BAR_NOT_READY", "note": "到店发现空桶还没整理"})
+		mustOK(t, code, d, "登记酒吧未备货")
+		// 酒吧店长不能登记 BAR_NOT_READY（角色不符）
+		code, _ = doJSON(t, "POST", "/api/pickups/visit", bar1,
+			M{"reservation_id": 801, "result": "BAR_NOT_READY"})
+		if code != 403 {
+			t.Fatalf("店长登记 BAR_NOT_READY 应 403, 实际 %d", code)
+		}
+		// 店长登记司机到店失败：801 属 bar1(4)
+		code, d = doJSON(t, "POST", "/api/pickups/visit", bar1,
+			M{"reservation_id": 801, "result": "DRIVER_FAILED", "note": "第二次又没来"})
+		// 801 已被置为 BAR_NOT_READY，允许再被改登记（覆盖为 DRIVER_FAILED 场景也允许）
+		if code != 200 {
+			t.Fatalf("店长可对本店预约登记司机到店失败: %d %v", code, d)
+		}
+	})
+
+	t.Run("桶追溯时间线含冻结与责任事件", func(t *testing.T) {
+		code, d := doJSON(t, "GET", "/api/kegs/trace/KEG-0017", admin, nil)
+		mustOK(t, code, d, "追溯 KEG-0017")
+		types := map[string]bool{}
+		for _, e := range d["events"].([]interface{}) {
+			types[e.(map[string]interface{})["event_type"].(string)] = true
+		}
+		for _, want := range []string{"DEPOSIT_FROZEN", "VISIT_DRIVER_FAILED", "RESPONSIBILITY_CONFIRMED",
+			"EMPTY_PROOF_UPLOADED", "PICKUP_TIME_CONFIRMED"} {
+			if !types[want] {
+				t.Fatalf("时间线缺少事件 %s: %v", want, types)
+			}
+		}
+		cur := d["current"].(map[string]interface{})
+		if cur["overdue_responsibility"] != "DRIVER" || cur["deposit_release_date"] != "2026-10-09" {
+			t.Fatalf("追溯当前态责任/释放日错误: %v", cur)
+		}
+	})
+}
+
 func TestRegisterKegsNumbering(t *testing.T) {
 	if err := resetTestDB(); err != nil {
 		t.Fatal(err)

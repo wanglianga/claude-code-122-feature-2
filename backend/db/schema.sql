@@ -141,14 +141,26 @@ CREATE TABLE IF NOT EXISTS keg_cycles (
     wash_id          BIGINT,
     -- 收货人/验收
     bar_receiver     TEXT,                          -- 酒吧收货人
-    -- 押金：HELD 占用中 / RELEASED 已释放 / DEDUCTED 扣款 / PARTIAL 部分扣款
+    -- 押金：HELD 占用中 / FROZEN 逾期冻结 / RELEASED 已释放 / DEDUCTED 扣款 / PARTIAL 部分扣款
     deposit_status   TEXT NOT NULL DEFAULT 'HELD'
-        CHECK (deposit_status IN ('HELD','RELEASED','DEDUCTED','PARTIAL')),
+        CHECK (deposit_status IN ('HELD','FROZEN','RELEASED','DEDUCTED','PARTIAL')),
+    deposit_frozen_at TIMESTAMPTZ,                  -- 逾期冻结时间（平台按桶编号冻结）
     released_amount  NUMERIC(10,2) NOT NULL DEFAULT 0,
     deducted_amount  NUMERIC(10,2) NOT NULL DEFAULT 0,
     deduct_reason    TEXT,
     settled_by       BIGINT REFERENCES app_users(id),
     settled_at       TIMESTAMPTZ,
+    -- 逾期责任：PENDING 待判定 / BAR 酒吧未备货责任 / DRIVER 司机到店失败责任 / CLEARED 责任厘清（无责或已闭环）
+    overdue_responsibility TEXT NOT NULL DEFAULT 'PENDING'
+        CHECK (overdue_responsibility IN ('PENDING','BAR','DRIVER','CLEARED')),
+    responsibility_note TEXT,
+    responsibility_by  BIGINT REFERENCES app_users(id),
+    responsibility_at  TIMESTAMPTZ,
+    deposit_release_date DATE,                      -- 责任确认后重新计算的押金释放日期
+    -- 店长确认回收时间
+    pickup_confirmed_at   TIMESTAMPTZ,
+    pickup_confirmed_by   BIGINT REFERENCES app_users(id),
+    pickup_confirm_note   TEXT,
     -- 异常标记
     late_return      BOOLEAN NOT NULL DEFAULT FALSE,    -- 延迟归还
     missing_scan     BOOLEAN NOT NULL DEFAULT FALSE,    -- 司机漏扫
@@ -179,11 +191,55 @@ CREATE TABLE IF NOT EXISTS return_reservations (
     id          BIGSERIAL PRIMARY KEY,
     cycle_id    BIGINT NOT NULL REFERENCES keg_cycles(id),
     bar_id      BIGINT NOT NULL REFERENCES bars(id),
+    driver_id   BIGINT REFERENCES drivers(id),       -- 实际到场司机（到场登记时回填）
     pickup_date DATE NOT NULL,
     empty_count INT NOT NULL DEFAULT 1,           -- 空桶数量
     note        TEXT,
+    -- WAITING 待取桶 / PICKED 已取桶 / MISSED 爽约逾期 / CANCELLED 已取消
+    -- BAR_NOT_READY 司机已到店但酒吧未备好空桶 / DRIVER_FAILED 司机未按约到店
     status      TEXT NOT NULL DEFAULT 'WAITING'
-        CHECK (status IN ('WAITING','PICKED','MISSED','CANCELLED')),
+        CHECK (status IN ('WAITING','PICKED','MISSED','CANCELLED','BAR_NOT_READY','DRIVER_FAILED')),
+    visit_note  TEXT,
+    visited_at  TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 司机到场记录：司机已到店但酒吧未备好空桶（BAR_NOT_READY）/ 酒吧备好但司机未到店（DRIVER_FAILED）
+-- 到场记录是逾期责任判定的关键依据
+CREATE TABLE IF NOT EXISTS driver_visits (
+    id             BIGSERIAL PRIMARY KEY,
+    reservation_id BIGINT REFERENCES return_reservations(id),
+    cycle_id       BIGINT NOT NULL REFERENCES keg_cycles(id),
+    bar_id         BIGINT NOT NULL REFERENCES bars(id),
+    driver_id      BIGINT REFERENCES drivers(id),
+    result         TEXT NOT NULL CHECK (result IN ('BAR_NOT_READY','DRIVER_FAILED')),
+    note           TEXT,
+    visited_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by     BIGINT REFERENCES app_users(id)
+);
+
+-- 逾期冻结后店长上传的"已打空但未回收"现场照片（申诉凭证，影响逾期责任判定）
+CREATE TABLE IF NOT EXISTS empty_proofs (
+    id          BIGSERIAL PRIMARY KEY,
+    cycle_id    BIGINT NOT NULL REFERENCES keg_cycles(id),
+    bar_id      BIGINT NOT NULL REFERENCES bars(id),
+    photo_data  TEXT NOT NULL,                        -- data:image/...;base64,...（演示环境内联存储）
+    note        TEXT,
+    created_by  BIGINT REFERENCES app_users(id),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 桶级提醒：逾期冻结后平台按桶提醒店长"预约回收/确认回收时间"，区别于批次停售通知
+CREATE TABLE IF NOT EXISTS bar_alerts (
+    id          BIGSERIAL PRIMARY KEY,
+    cycle_id    BIGINT NOT NULL REFERENCES keg_cycles(id),
+    bar_id      BIGINT NOT NULL REFERENCES bars(id),
+    kind        TEXT NOT NULL DEFAULT 'OVERDUE_FREEZE'
+        CHECK (kind IN ('OVERDUE_FREEZE','RESPONSIBILITY','PICKUP_CONFIRMED')),
+    title       TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    ack_by      BIGINT REFERENCES app_users(id),
+    ack_at      TIMESTAMPTZ,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -252,6 +308,10 @@ CREATE TABLE IF NOT EXISTS keg_events (
 CREATE INDEX IF NOT EXISTS idx_cycles_batch ON keg_cycles(batch_id);
 CREATE INDEX IF NOT EXISTS idx_cycles_bar ON keg_cycles(bar_id);
 CREATE INDEX IF NOT EXISTS idx_cycles_stage ON keg_cycles(stage);
+CREATE INDEX IF NOT EXISTS idx_cycles_deposit_status ON keg_cycles(deposit_status);
 CREATE INDEX IF NOT EXISTS idx_feedback_cycle ON tap_feedback(cycle_id);
 CREATE INDEX IF NOT EXISTS idx_events_keg ON keg_events(keg_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notif_batch ON notifications(batch_id);
+CREATE INDEX IF NOT EXISTS idx_visits_cycle ON driver_visits(cycle_id);
+CREATE INDEX IF NOT EXISTS idx_proofs_cycle ON empty_proofs(cycle_id);
+CREATE INDEX IF NOT EXISTS idx_bar_alerts_bar ON bar_alerts(bar_id, ack_at);

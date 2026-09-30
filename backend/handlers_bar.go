@@ -18,11 +18,20 @@ func handleBarCycles(w http.ResponseWriter, r *http.Request) {
 		SELECT c.id, k.keg_code, k.capacity_liters, be.style, be.name, ba.batch_no, ba.status,
 		       c.stage, c.deposit_amount, c.deposit_due_date, c.tapped_at, c.emptied_at,
 		       c.deposit_status, c.late_return, c.missing_scan, c.lost,
-		       (CURRENT_DATE > c.deposit_due_date AND c.stage NOT IN ('WASHED','FAILED')) AS overdue
+		       (CURRENT_DATE > c.deposit_due_date AND c.stage NOT IN ('WASHED','FAILED')),
+		       COALESCE(text(c.deposit_frozen_at),''), c.overdue_responsibility,
+		       COALESCE(text(c.deposit_release_date),''), COALESCE(text(c.pickup_confirmed_at),''),
+		       COALESCE(pr.n,0), COALESCE(v.result,''), COALESCE(v.note,''),
+		       COALESCE(rv.status,''), COALESCE(text(rv.pickup_date),'')
 		FROM keg_cycles c
 		JOIN kegs k ON k.id=c.keg_id
 		JOIN batches ba ON ba.id=c.batch_id
 		JOIN beers be ON be.id=ba.beer_id
+		LEFT JOIN LATERAL (SELECT count(*) AS n FROM empty_proofs p WHERE p.cycle_id=c.id) pr ON TRUE
+		LEFT JOIN LATERAL (SELECT result, note FROM driver_visits dv
+		                   WHERE dv.cycle_id=c.id ORDER BY dv.id DESC LIMIT 1) v ON TRUE
+		LEFT JOIN LATERAL (SELECT status, pickup_date FROM return_reservations rr
+		                   WHERE rr.cycle_id=c.id ORDER BY rr.id DESC LIMIT 1) rv ON TRUE
 		WHERE c.bar_id=$1
 		ORDER BY c.id DESC`, barID)
 	if err != nil {
@@ -35,10 +44,15 @@ func handleBarCycles(w http.ResponseWriter, r *http.Request) {
 		var capacity, deposit float64
 		var due sql.NullTime
 		var tapped, emptied sql.NullTime
+		var frozenAt, releaseDate, confirmedAt sql.NullString
+		var responsibility, visitResult, visitNote, rvStatus, rvPickup string
 		var late, missing, lost, overdue bool
+		var proofN int64
 		if err := rs.Scan(&id, &code, &capacity, &style, &beer, &batchNo, &batchStatus,
 			&stage, &deposit, &due, &tapped, &emptied, &depositStatus,
-			&late, &missing, &lost, &overdue); err != nil {
+			&late, &missing, &lost, &overdue,
+			&frozenAt, &responsibility, &releaseDate, &confirmedAt,
+			&proofN, &visitResult, &visitNote, &rvStatus, &rvPickup); err != nil {
 			return nil, err
 		}
 		return M{"cycle_id": id, "keg_code": code, "capacity_liters": capacity,
@@ -46,7 +60,11 @@ func handleBarCycles(w http.ResponseWriter, r *http.Request) {
 			"stage": stage, "deposit_amount": deposit, "deposit_due_date": dateStr(due),
 			"tapped_at": tsStr(tapped), "emptied_at": tsStr(emptied),
 			"deposit_status": depositStatus, "late_return": late, "missing_scan": missing,
-			"lost": lost, "overdue": overdue}, nil
+			"lost": lost, "overdue": overdue,
+			"deposit_frozen_at": frozenAt.String, "overdue_responsibility": responsibility,
+			"deposit_release_date": releaseDate.String, "pickup_confirmed_at": confirmedAt.String,
+			"proof_count": proofN, "visit_result": visitResult, "visit_note": visitNote,
+			"reservation_status": rvStatus, "reservation_pickup_date": rvPickup}, nil
 	})
 	writeOK(w, M{"cycles": list, "bar_id": barID})
 }

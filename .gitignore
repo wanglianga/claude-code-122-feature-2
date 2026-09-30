@@ -33,3 +33,7 @@ temp/
 *debug*
 *temp*
 *tmp*
+
+# 但保留后端 embed 所需的前端构建产物（go:embed web/dist）
+!backend/web/dist/
+!backend/web/dist/**

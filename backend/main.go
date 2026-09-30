@@ -52,6 +52,21 @@ func main() {
 		return
 	}
 
+	// auto（容器默认）：库为空时自动建表并加载种子数据，然后正常启动
+	if len(os.Args) > 1 && os.Args[1] == "auto" {
+		var tableN int
+		if err := db.QueryRow(`SELECT count(*) FROM information_schema.tables WHERE table_schema='public'`).
+			Scan(&tableN); err != nil {
+			log.Fatalf("检查数据库失败: %v", err)
+		}
+		if tableN == 0 {
+			log.Println("检测到空数据库，自动加载 schema 与种子数据")
+			if err := initDB(); err != nil {
+				log.Fatal(err)
+			}
+		}
+	}
+
 	mux := http.NewServeMux()
 	registerRoutes(mux)
 
@@ -101,14 +116,19 @@ func registerRoutes(mux *http.ServeMux) {
 
 	// 酒吧
 	mux.HandleFunc("/api/bar/cycles", hr("bar_manager admin", handleBarCycles))
+	mux.HandleFunc("/api/bar/alerts", hr("bar_manager admin brewery finance qc", handleBarAlerts))
+	mux.HandleFunc("/api/bar/alerts/ack/", hr("bar_manager admin", handleAckBarAlert))
 	mux.HandleFunc("/api/cycles/feedback/", hr("bar_manager admin", handleTapFeedback))
 	mux.HandleFunc("/api/cycles/empty/", hr("bar_manager admin", handleMarkEmpty))
 	mux.HandleFunc("/api/cycles/reserve", hr("bar_manager admin", handleReserveReturn))
+	mux.HandleFunc("/api/cycles/confirm-pickup", hr("bar_manager admin", handleConfirmPickup))
+	mux.HandleFunc("/api/cycles/proofs/", hr("bar_manager admin finance brewery", handleProofSubroute))
 	mux.HandleFunc("/api/cycles/lost/", hr("brewery finance admin", handleMarkLost))
 
 	// 司机
 	mux.HandleFunc("/api/driver/tasks", hr("driver admin", handleDriverTasks))
 	mux.HandleFunc("/api/pickups/scan", hr("driver admin", handlePickupScan))
+	mux.HandleFunc("/api/pickups/visit", hr("driver bar_manager admin", handlePickupVisit))
 	mux.HandleFunc("/api/driver/audit", hr("driver brewery admin", handleDriverAudit))
 
 	// 清洗厂
@@ -121,6 +141,8 @@ func registerRoutes(mux *http.ServeMux) {
 	// 财务
 	mux.HandleFunc("/api/finance/deposits", hr("finance brewery admin", handleDeposits))
 	mux.HandleFunc("/api/finance/settle/", hr("finance admin", handleSettleDeposit))
+	mux.HandleFunc("/api/finance/freeze-overdue", hr("finance admin", handleFreezeOverdue))
+	mux.HandleFunc("/api/finance/responsibility/", hr("finance admin", handleResponsibility))
 
 	// 通知
 	mux.HandleFunc("/api/notifications", h(handleNotifications))

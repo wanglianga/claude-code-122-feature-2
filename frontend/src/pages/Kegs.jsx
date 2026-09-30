@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { api } from '../api.js'
-import { Badge, KEG_STATUS, STAGE, DEPOSIT, Modal, Flags, Empty } from '../components.jsx'
+import { Badge, KEG_STATUS, STAGE, DEPOSIT, RESPONSIBILITY, Modal, Flags, Empty } from '../components.jsx'
 
 const ASSET_OPTS = [['', '全部资产状态'], ['IN_STOCK', '酒厂仓库'], ['AT_BAR', '在店'], ['EMPTY_RESERVED', '空桶待回收'],
   ['PICKED', '司机已收'], ['WASH_FAIL', '清洗不合格'], ['LOST', '丢失']]
@@ -90,7 +90,12 @@ function TraceModal({ d, onClose }) {
               <dt>当前阶段</dt><dd><Badge map={STAGE} value={c.stage} /></dd>
               <dt>押金 / 账期</dt><dd>¥{c.deposit_amount} · 到期 {c.deposit_due_date}</dd>
               <dt>押金状态</dt><dd><Badge map={DEPOSIT} value={c.deposit_status} /></dd>
-              {c.deposit_status !== 'HELD' && <>
+              {c.deposit_status === 'FROZEN' && <>
+                <dt>冻结时间</dt><dd>{c.deposit_frozen_at}</dd>
+                <dt>逾期责任</dt><dd><Badge map={RESPONSIBILITY} value={c.overdue_responsibility || 'PENDING'} /></dd>
+                {c.deposit_release_date && <><dt>释放日（重算）</dt><dd>{c.deposit_release_date}</dd></>}
+              </>}
+              {c.deposit_status !== 'HELD' && c.deposit_status !== 'FROZEN' && <>
                 <dt>已释放</dt><dd>¥{c.released_amount}</dd>
                 <dt>已扣款</dt><dd>¥{c.deducted_amount}{c.deduct_reason ? `（${c.deduct_reason}）` : ''}</dd>
               </>}
@@ -120,7 +125,10 @@ const EVENT_NAME = {
   DELIVERED: '配送签收', TAPPED: '开桶售酒', TAP_FEEDBACK: '开桶反馈', EMPTIED: '酒桶打空',
   RETURN_RESERVED: '预约回收', PICKED: '司机扫码回收', MISSING_SCAN: '司机漏扫（审计）',
   WASHED: '清洗检测合格·回库', WASH_FAILED: '清洗检测不合格',
-  DEPOSIT_SETTLED: '押金结算', MARKED_LOST: '登记丢失'
+  DEPOSIT_SETTLED: '押金结算', MARKED_LOST: '登记丢失',
+  DEPOSIT_FROZEN: '押金逾期冻结', RESPONSIBILITY_CONFIRMED: '逾期责任确认',
+  VISIT_BAR_NOT_READY: '到场：酒吧未备好空桶', VISIT_DRIVER_FAILED: '到场：司机到店失败',
+  EMPTY_PROOF_UPLOADED: '店长上传现场照片', PICKUP_TIME_CONFIRMED: '店长确认回收时间'
 }
 
 function RegisterModal({ onClose, onDone }) {

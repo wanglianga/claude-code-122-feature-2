@@ -10,7 +10,8 @@ func handleDriverTasks(w http.ResponseWriter, r *http.Request) {
 	u := currentUser(r)
 	rows, err := db.Query(`
 		SELECT rv.id, rv.cycle_id, b.id, b.name, ci.name, rv.pickup_date, rv.empty_count,
-		       COALESCE(rv.note,''), rv.status
+		       COALESCE(rv.note,''), rv.status, COALESCE(rv.visit_note,''),
+		       COALESCE(text(rv.visited_at),'')
 		FROM return_reservations rv
 		JOIN bars b ON b.id=rv.bar_id
 		JOIN cities ci ON ci.id=b.city_id
@@ -22,13 +23,14 @@ func handleDriverTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	list := scanRows(rows, func(rs rowScanner) (M, error) {
 		var id, firstCycle, barID, emptyCount int64
-		var bar, city, pickup, note, status string
+		var bar, city, pickup, note, status, visitNote, visitedAt string
 		if err := rs.Scan(&id, &firstCycle, &barID, &bar, &city, &pickup, &emptyCount,
-			&note, &status); err != nil {
+			&note, &status, &visitNote, &visitedAt); err != nil {
 			return nil, err
 		}
 		m := M{"reservation_id": id, "bar_id": barID, "bar": bar, "city": city,
-			"pickup_date": pickup, "empty_count": emptyCount, "note": note, "status": status}
+			"pickup_date": pickup, "empty_count": emptyCount, "note": note, "status": status,
+			"visit_note": visitNote, "visited_at": visitedAt}
 
 		// 预约应收桶 vs 已扫码桶（差异即漏扫）
 		crows, _ := db.Query(`
@@ -151,7 +153,8 @@ func handlePickupScan(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if req.ReservationID != 0 {
-			if _, err := tx.Exec(`UPDATE return_reservations SET status='PICKED' WHERE id=$1 AND status='WAITING'`,
+			if _, err := tx.Exec(`UPDATE return_reservations SET status='PICKED'
+				WHERE id=$1 AND status IN ('WAITING','BAR_NOT_READY','DRIVER_FAILED','MISSED')`,
 				req.ReservationID); err != nil {
 				return err
 			}

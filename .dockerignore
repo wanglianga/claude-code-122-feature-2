@@ -1,0 +1,15 @@
+.git
+.gitignore
+.claude
+.codex
+.pgdata
+.npm-cache
+**/node_modules
+frontend/dist
+backend/web/dist
+backend/kegplatform
+*.log
+screenshots
+recordings
+tmp
+temp

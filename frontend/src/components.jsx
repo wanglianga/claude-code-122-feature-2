@@ -13,14 +13,29 @@ export const STAGE = {
   WASHED: ['清洗合格', 'green'], FAILED: ['清洗不合格', 'red']
 }
 export const DEPOSIT = {
-  HELD: ['押金占用中', 'amber'], RELEASED: ['已释放', 'green'],
+  HELD: ['押金占用中', 'amber'], FROZEN: ['逾期冻结', 'red'], RELEASED: ['已释放', 'green'],
   DEDUCTED: ['已扣款', 'red'], PARTIAL: ['部分扣款', 'amber']
+}
+export const RESPONSIBILITY = {
+  PENDING: ['责任待判定', 'amber'], BAR: ['酒吧责任（未备货）', 'red'],
+  DRIVER: ['司机责任（到店失败）', 'purple'], CLEARED: ['无责/已厘清', 'gray']
+}
+export const VISIT_RESULT = {
+  BAR_NOT_READY: ['司机已到店·酒吧未备好空桶', 'red'],
+  DRIVER_FAILED: ['酒吧已备货·司机未到店', 'purple']
+}
+export const ALERT_KIND = {
+  OVERDUE_FREEZE: ['逾期冻结', 'red'], RESPONSIBILITY: ['责任判定', 'amber'],
+  PICKUP_CONFIRMED: ['回收时间已确认', 'green']
 }
 export const BATCH_STATUS = {
   NORMAL: ['正常', 'green'], SUSPENDED: ['暂停销售', 'red'],
   RECALLED: ['召回中', 'red'], CLEARED: ['已解除', 'gray']
 }
-export const RES_STATUS = { WAITING: ['待取桶', 'amber'], PICKED: ['已取桶', 'green'], MISSED: ['爽约/逾期', 'red'], CANCELLED: ['已取消', 'gray'] }
+export const RES_STATUS = {
+  WAITING: ['待取桶', 'amber'], PICKED: ['已取桶', 'green'], MISSED: ['爽约/逾期', 'red'],
+  CANCELLED: ['已取消', 'gray'], BAR_NOT_READY: ['酒吧未备好空桶', 'red'], DRIVER_FAILED: ['司机未到店', 'purple']
+}
 export const AUDIENCE = { BAR: '已收货酒吧', PENDING_ORDER: '待配送订单', DEALER_STOCK: '经销商库存', ALL: '全渠道' }
 
 export function Badge({ map, value }) {

@@ -1,0 +1,33 @@
+services:
+  db:
+    image: postgres:15-bookworm
+    environment:
+      POSTGRES_USER: node
+      POSTGRES_PASSWORD: node
+      POSTGRES_DB: kegplatform
+    ports:
+      - "5433:5432"
+    volumes:
+      - kegpgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U node -d kegplatform"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      KEG_DSN: "host=db port=5432 user=node password=node dbname=kegplatform sslmode=disable"
+      KEG_ADDR: ":8080"
+      KEG_TOKEN_SECRET: "kegplatform-docker-secret"
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  kegpgdata:

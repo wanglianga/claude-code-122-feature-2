@@ -26,6 +26,10 @@ export default function Overview() {
       <div className="grid cols-4">
         <Stat label="账期逾期未闭环" value={d.overdue} kind={d.overdue ? 'alert' : 'ok'}
           sub={<Link to="/finance?overdue=1">去财务处理 →</Link>} />
+        <Stat label="逾期冻结待定责" value={d.deposit_frozen_pending || 0} kind={d.deposit_frozen_pending ? 'alert' : 'ok'}
+          sub={<Link to="/finance">到场记录+现场照片定责 →</Link>} />
+        <Stat label="司机到店失败记录" value={d.driver_failed_visits || 0} kind={d.driver_failed_visits ? 'warn' : 'ok'}
+          sub="逾期责任倾向司机" />
         <Stat label="司机漏扫待核查" value={d.missing_scan} kind={d.missing_scan ? 'alert' : 'ok'}
           sub={<Link to="/driver">去回收任务核对 →</Link>} />
         <Stat label="清洗不合格桶" value={d.wash_fail} kind={d.wash_fail ? 'alert' : 'ok'}
