@@ -23,6 +23,44 @@ export const BATCH_STATUS = {
 export const RES_STATUS = { WAITING: ['待取桶', 'amber'], PICKED: ['已取桶', 'green'], MISSED: ['爽约/逾期', 'red'], CANCELLED: ['已取消', 'gray'] }
 export const AUDIENCE = { BAR: '已收货酒吧', PENDING_ORDER: '待配送订单', DEALER_STOCK: '经销商库存', ALL: '全渠道' }
 
+// 逾期责任方 / 司机到店结果 / 照片审核状态
+export const LIABILITY = {
+  BAR: ['酒吧方责任', 'red'], DRIVER: ['司机/物流责任', 'purple'], NONE: ['酒吧方无责', 'green']
+}
+export const VISIT = {
+  READY: ['到店·已备好', 'green'], BAR_NOT_READY: ['到店·酒吧未备货', 'red'], DRIVER_FAILED: ['司机到店失败', 'purple']
+}
+export const PHOTO_STATUS = {
+  PENDING: ['待核实', 'amber'], APPROVED: ['已采信', 'green'], REJECTED: ['未采信', 'red']
+}
+
+// 读取图片文件并压缩为 data URL（逾期现场照片上传）
+export function fileToDataURL(file, maxSize = 900, quality = 0.72) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('图片读取失败'))
+    reader.onload = () => {
+      const img = new Image()
+      img.onerror = () => reject(new Error('图片解析失败'))
+      img.onload = () => {
+        let { width, height } = img
+        if (width > maxSize || height > maxSize) {
+          const scale = maxSize / Math.max(width, height)
+          width = Math.round(width * scale)
+          height = Math.round(height * scale)
+        }
+        const canvas = document.createElement('canvas')
+        canvas.width = width
+        canvas.height = height
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height)
+        resolve(canvas.toDataURL('image/jpeg', quality))
+      }
+      img.src = reader.result
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
 export function Badge({ map, value }) {
   const [text, cls] = map[value] || [value, 'gray']
   return <span className={'badge ' + cls}>{text}</span>

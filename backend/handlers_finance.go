@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"net/http"
+	"time"
 )
 
 // GET /api/finance/deposits?status=&overdue=
@@ -13,7 +14,11 @@ func handleDeposits(w http.ResponseWriter, r *http.Request) {
 	       c.stage, c.late_return, c.missing_scan, c.lost, c.deformed,
 	       (CURRENT_DATE - c.deposit_due_date),
 	       COALESCE(text(c.settled_at),''),
-	       COALESCE(ps.appearance,'完好'), COALESCE(ps.residue_level,'无'), COALESCE(ps.cap_status,'已封盖')
+	       COALESCE(ps.appearance,'完好'), COALESCE(ps.residue_level,'无'), COALESCE(ps.cap_status,'已封盖'),
+	       c.deposit_frozen, COALESCE(c.liability_party,''), COALESCE(text(c.release_due_date),''),
+	       COALESCE(c.liability_note,''), c.bar_not_ready_count, c.driver_fail_count,
+	       (SELECT count(*) FROM empty_photos p WHERE p.cycle_id=c.id AND p.status='APPROVED'),
+	       (SELECT count(*) FROM empty_photos p WHERE p.cycle_id=c.id AND p.status='PENDING')
 		FROM keg_cycles c
 		JOIN kegs k ON k.id=c.keg_id
 		JOIN batches ba ON ba.id=c.batch_id
@@ -33,7 +38,10 @@ func handleDeposits(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("overdue") == "1" {
 		q += " AND c.deposit_due_date < CURRENT_DATE AND c.deposit_status='HELD'"
 	}
-	q += " ORDER BY c.deposit_due_date, c.id"
+	if r.URL.Query().Get("frozen") == "1" {
+		q += " AND c.deposit_frozen"
+	}
+	q += " ORDER BY c.deposit_frozen DESC, c.deposit_due_date, c.id"
 
 	rows, err := db.Query(q, args...)
 	if err != nil {
@@ -43,15 +51,17 @@ func handleDeposits(w http.ResponseWriter, r *http.Request) {
 	list := scanRows(rows, func(rs rowScanner) (M, error) {
 		var id int64
 		var code, bar, city, style, batchNo, status, reason, stage string
-		var settled, appearance, residue, cap string
+		var settled, appearance, residue, cap, liability, releaseDue, liabilityNote string
 		var deposit, released, deducted float64
 		var due sql.NullTime
-		var late, missing, lost, deformed bool
-		var overdueDays int64
+		var late, missing, lost, deformed, frozen bool
+		var overdueDays, notReady, driverFail, photoApproved, photoPending int64
 		if err := rs.Scan(&id, &code, &bar, &city, &style, &batchNo,
 			&deposit, &due, &status, &released, &deducted, &reason,
 			&stage, &late, &missing, &lost, &deformed, &overdueDays,
-			&settled, &appearance, &residue, &cap); err != nil {
+			&settled, &appearance, &residue, &cap,
+			&frozen, &liability, &releaseDue, &liabilityNote,
+			&notReady, &driverFail, &photoApproved, &photoPending); err != nil {
 			return nil, err
 		}
 		return M{"cycle_id": id, "keg_code": code, "bar": bar, "city": city,
@@ -61,22 +71,31 @@ func handleDeposits(w http.ResponseWriter, r *http.Request) {
 			"deduct_reason": reason, "stage": stage, "late_return": late,
 			"missing_scan": missing, "lost": lost, "deformed": deformed,
 			"overdue_days": overdueDays, "settled_at": settled,
-			"appearance": appearance, "residue_level": residue, "cap_status": cap}, nil
+			"appearance": appearance, "residue_level": residue, "cap_status": cap,
+			"deposit_frozen": frozen, "liability_party": liability,
+			"release_due_date": releaseDue, "liability_note": liabilityNote,
+			"bar_not_ready_count": notReady, "driver_fail_count": driverFail,
+			"photo_approved": photoApproved, "photo_pending": photoPending}, nil
 	})
 
 	// 汇总
 	summary := M{}
-	var heldAmt, releasedAmt, deductedAmt float64
-	var heldN, overdueN int
+	var heldAmt, releasedAmt, deductedAmt, frozenAmt float64
+	var heldN, overdueN, frozenN, pendingPhotoN int
 	_ = db.QueryRow(`SELECT
 		COALESCE(sum(deposit_amount) FILTER (WHERE deposit_status='HELD'),0),
 		count(*) FILTER (WHERE deposit_status='HELD'),
 		count(*) FILTER (WHERE deposit_status='HELD' AND deposit_due_date<CURRENT_DATE),
 		COALESCE(sum(released_amount),0),
-		COALESCE(sum(deducted_amount),0)
-		FROM keg_cycles`).Scan(&heldAmt, &heldN, &overdueN, &releasedAmt, &deductedAmt)
+		COALESCE(sum(deducted_amount),0),
+		COALESCE(sum(deposit_amount) FILTER (WHERE deposit_frozen),0),
+		count(*) FILTER (WHERE deposit_frozen),
+		(SELECT count(*) FROM empty_photos WHERE status='PENDING')
+		FROM keg_cycles`).Scan(&heldAmt, &heldN, &overdueN, &releasedAmt, &deductedAmt,
+		&frozenAmt, &frozenN, &pendingPhotoN)
 	summary = M{"held_amount": heldAmt, "held_count": heldN, "overdue_count": overdueN,
-		"released_total": releasedAmt, "deducted_total": deductedAmt}
+		"released_total": releasedAmt, "deducted_total": deductedAmt,
+		"frozen_amount": frozenAmt, "frozen_count": frozenN, "pending_photos": pendingPhotoN}
 
 	writeOK(w, M{"deposits": list, "summary": summary})
 }
@@ -105,12 +124,23 @@ func handleSettleDeposit(w http.ResponseWriter, r *http.Request) {
 		var kegID int64
 		var deposit float64
 		var status string
-		if err := tx.QueryRow(`SELECT keg_id, deposit_amount, deposit_status
-			FROM keg_cycles WHERE id=$1 FOR UPDATE`, id).Scan(&kegID, &deposit, &status); err != nil {
+		var frozen bool
+		var releaseDue sql.NullTime
+		if err := tx.QueryRow(`SELECT keg_id, deposit_amount, deposit_status, deposit_frozen, release_due_date
+			FROM keg_cycles WHERE id=$1 FOR UPDATE`, id).Scan(&kegID, &deposit, &status, &frozen, &releaseDue); err != nil {
 			return errBad("流转记录不存在")
 		}
 		if status != "HELD" {
 			return errBad("该桶押金已结算（" + status + "），不能重复操作")
+		}
+		// 逾期冻结中的桶必须先完成责任确认
+		if req.Action == "release" && frozen {
+			return errBad("该桶押金处于逾期冻结中，请先确认逾期责任，再按重新计算的释放日释放")
+		}
+		// 逾期责任确认后释放日被重新计算：未到释放日不能全额释放
+		if req.Action == "release" && releaseDue.Valid && releaseDue.Time.After(time.Now()) {
+			return errBad("该桶逾期责任已确认，押金新释放日为 " +
+				releaseDue.Time.Format("2006-01-02") + "，未到释放日不能释放（可按责任情况部分扣款）")
 		}
 
 		var released, deducted float64

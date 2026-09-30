@@ -101,13 +101,19 @@ func registerRoutes(mux *http.ServeMux) {
 
 	// 酒吧
 	mux.HandleFunc("/api/bar/cycles", hr("bar_manager admin", handleBarCycles))
+	mux.HandleFunc("/api/bar/alerts", hr("bar_manager admin", handleBarAlerts))
+	mux.HandleFunc("/api/bar/alerts/ack/", hr("bar_manager admin", handleAckBarAlert))
 	mux.HandleFunc("/api/cycles/feedback/", hr("bar_manager admin", handleTapFeedback))
 	mux.HandleFunc("/api/cycles/empty/", hr("bar_manager admin", handleMarkEmpty))
+	mux.HandleFunc("/api/cycles/photo/", hr("bar_manager admin", handleEmptyPhoto))
+	mux.HandleFunc("/api/cycles/photos/", h(handleCyclePhotos))
 	mux.HandleFunc("/api/cycles/reserve", hr("bar_manager admin", handleReserveReturn))
+	mux.HandleFunc("/api/cycles/confirm-return", hr("bar_manager admin", handleConfirmReturn))
 	mux.HandleFunc("/api/cycles/lost/", hr("brewery finance admin", handleMarkLost))
 
 	// 司机
 	mux.HandleFunc("/api/driver/tasks", hr("driver admin", handleDriverTasks))
+	mux.HandleFunc("/api/driver/visit", hr("driver admin", handleDriverVisit))
 	mux.HandleFunc("/api/pickups/scan", hr("driver admin", handlePickupScan))
 	mux.HandleFunc("/api/driver/audit", hr("driver brewery admin", handleDriverAudit))
 
@@ -121,6 +127,10 @@ func registerRoutes(mux *http.ServeMux) {
 	// 财务
 	mux.HandleFunc("/api/finance/deposits", hr("finance brewery admin", handleDeposits))
 	mux.HandleFunc("/api/finance/settle/", hr("finance admin", handleSettleDeposit))
+	mux.HandleFunc("/api/overdue/scan", hr("brewery finance admin", handleOverdueScan))
+	mux.HandleFunc("/api/finance/liability/", hr("finance admin", handleLiabilityConfirm))
+	mux.HandleFunc("/api/finance/photo-queue", hr("finance brewery admin", handlePhotoQueue))
+	mux.HandleFunc("/api/finance/photos/", hr("finance admin", handlePhotoReview))
 
 	// 通知
 	mux.HandleFunc("/api/notifications", h(handleNotifications))

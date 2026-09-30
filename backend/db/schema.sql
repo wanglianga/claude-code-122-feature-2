@@ -249,9 +249,91 @@ CREATE TABLE IF NOT EXISTS keg_events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- ========== 空桶逾期押金冻结 / 到场举证 / 责任判定 ==========
+
+-- 周期上补充：冻结标记、逾期责任方、重新计算的押金释放日、店长确认回收时间
+ALTER TABLE keg_cycles ADD COLUMN IF NOT EXISTS deposit_frozen   BOOLEAN NOT NULL DEFAULT FALSE; -- 逾期已按桶冻结押金
+ALTER TABLE keg_cycles ADD COLUMN IF NOT EXISTS frozen_at        TIMESTAMPTZ;                    -- 冻结时间
+ALTER TABLE keg_cycles ADD COLUMN IF NOT EXISTS liability_party  TEXT CHECK (liability_party IN ('BAR','DRIVER','NONE')); -- 逾期责任：酒吧/司机物流/酒吧无责
+ALTER TABLE keg_cycles ADD COLUMN IF NOT EXISTS liability_note   TEXT;
+ALTER TABLE keg_cycles ADD COLUMN IF NOT EXISTS liability_confirmed_by BIGINT REFERENCES app_users(id);
+ALTER TABLE keg_cycles ADD COLUMN IF NOT EXISTS liability_confirmed_at   TIMESTAMPTZ;
+ALTER TABLE keg_cycles ADD COLUMN IF NOT EXISTS release_due_date DATE;        -- 责任确认后重新计算的押金可释放日
+ALTER TABLE keg_cycles ADD COLUMN IF NOT EXISTS return_confirmed_at TIMESTAMPTZ; -- 店长确认的回收时间
+ALTER TABLE keg_cycles ADD COLUMN IF NOT EXISTS bar_not_ready_count INT NOT NULL DEFAULT 0;  -- 到店但酒吧未备好空桶次数
+ALTER TABLE keg_cycles ADD COLUMN IF NOT EXISTS driver_fail_count    INT NOT NULL DEFAULT 0;  -- 司机到店失败次数
+
+-- 押金冻结记录（一只桶一个有效冻结周期）
+CREATE TABLE IF NOT EXISTS deposit_freezes (
+    id                 BIGSERIAL PRIMARY KEY,
+    cycle_id           BIGINT NOT NULL UNIQUE REFERENCES keg_cycles(id),
+    keg_id             BIGINT NOT NULL REFERENCES kegs(id),
+    bar_id             BIGINT NOT NULL REFERENCES bars(id),
+    deposit_amount     NUMERIC(10,2) NOT NULL,
+    original_due_date  DATE NOT NULL,          -- 冻结时的原账期到期日
+    overdue_days       INT NOT NULL DEFAULT 0, -- 冻结时已逾期天数
+    -- FROZEN 冻结中 / RESOLVED 已解除（责任确认并重新排期）
+    status             TEXT NOT NULL DEFAULT 'FROZEN' CHECK (status IN ('FROZEN','RESOLVED')),
+    resolved_at        TIMESTAMPTZ,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 司机到店记录：到场是否备好空桶直接影响逾期责任判定
+CREATE TABLE IF NOT EXISTS driver_visits (
+    id             BIGSERIAL PRIMARY KEY,
+    reservation_id BIGINT REFERENCES return_reservations(id),
+    cycle_id       BIGINT REFERENCES keg_cycles(id),
+    driver_id      BIGINT NOT NULL REFERENCES drivers(id),
+    bar_id         BIGINT NOT NULL REFERENCES bars(id),
+    city_id        BIGINT NOT NULL REFERENCES cities(id),
+    -- READY 到店且空桶已备好（随后扫码回收）
+    -- BAR_NOT_READY 司机已到店但酒吧未备好空桶 → 责任在酒吧
+    -- DRIVER_FAILED 司机到店失败（车辆/调度等原因未能履约）→ 酒吧可免责
+    result         TEXT NOT NULL CHECK (result IN ('READY','BAR_NOT_READY','DRIVER_FAILED')),
+    note           TEXT,
+    arrived_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_visits_cycle ON driver_visits(cycle_id);
+CREATE INDEX IF NOT EXISTS idx_visits_reservation ON driver_visits(reservation_id);
+CREATE INDEX IF NOT EXISTS idx_visits_bar ON driver_visits(bar_id);
+
+-- 逾期冻结后店长上传的"已打空但未回收"现场照片（举证材料）
+CREATE TABLE IF NOT EXISTS empty_photos (
+    id           BIGSERIAL PRIMARY KEY,
+    cycle_id     BIGINT NOT NULL REFERENCES keg_cycles(id),
+    bar_id       BIGINT NOT NULL REFERENCES bars(id),
+    photo_data   TEXT,                        -- data URL（演示环境内置存储）
+    note         TEXT,
+    -- PENDING 待核实 / APPROVED 采信（桶确已打空）/ REJECTED 不采信
+    status       TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','APPROVED','REJECTED')),
+    reviewed_by  BIGINT REFERENCES app_users(id),
+    reviewed_at  TIMESTAMPTZ,
+    review_note  TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_photos_cycle ON empty_photos(cycle_id);
+
+-- 店长提醒（逾期冻结/责任结果等，不依赖批次通知）
+CREATE TABLE IF NOT EXISTS bar_alerts (
+    id          BIGSERIAL PRIMARY KEY,
+    bar_id      BIGINT NOT NULL REFERENCES bars(id),
+    kind        TEXT NOT NULL CHECK (kind IN ('OVERDUE_FREEZE','RETURN_REMINDER','LIABILITY_RESULT','PHOTO_REVIEWED')),
+    cycle_id    BIGINT REFERENCES keg_cycles(id),
+    ref_id      BIGINT,                       -- deposit_freezes.id 等关联对象
+    title       TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    ack_by      BIGINT REFERENCES app_users(id),
+    ack_at      TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_bar ON bar_alerts(bar_id, ack_at);
+
 CREATE INDEX IF NOT EXISTS idx_cycles_batch ON keg_cycles(batch_id);
 CREATE INDEX IF NOT EXISTS idx_cycles_bar ON keg_cycles(bar_id);
 CREATE INDEX IF NOT EXISTS idx_cycles_stage ON keg_cycles(stage);
 CREATE INDEX IF NOT EXISTS idx_feedback_cycle ON tap_feedback(cycle_id);
 CREATE INDEX IF NOT EXISTS idx_events_keg ON keg_events(keg_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notif_batch ON notifications(batch_id);
+CREATE INDEX IF NOT EXISTS idx_freezes_bar ON deposit_freezes(bar_id, status);
+CREATE INDEX IF NOT EXISTS idx_cycles_frozen ON keg_cycles(deposit_frozen) WHERE deposit_frozen;

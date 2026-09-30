@@ -1,0 +1,35 @@
+# 一键启动：PostgreSQL 15 + 已 embed 前端的 Go 单二进制
+# 使用：docker compose up --build    然后打开 http://localhost:8080
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: kegplatform-db
+    environment:
+      POSTGRES_USER: keg
+      POSTGRES_PASSWORD: keg
+      POSTGRES_DB: kegplatform
+    volumes:
+      - kegdb:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keg"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kegplatform-app
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      KEG_DSN: "host=db port=5432 user=keg password=keg dbname=kegplatform sslmode=disable"
+      KEG_ADDR: ":8080"
+      KEG_TOKEN_SECRET: "change-me-in-production"
+    ports:
+      - "8080:8080"
+
+volumes:
+  kegdb:

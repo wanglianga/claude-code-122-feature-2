@@ -33,19 +33,23 @@ func handleDriverTasks(w http.ResponseWriter, r *http.Request) {
 		// 预约应收桶 vs 已扫码桶（差异即漏扫）
 		crows, _ := db.Query(`
 			SELECT rc.cycle_id, k.keg_code, c.stage,
-			       EXISTS(SELECT 1 FROM pickup_scans ps WHERE ps.cycle_id=rc.cycle_id)
+			       EXISTS(SELECT 1 FROM pickup_scans ps WHERE ps.cycle_id=rc.cycle_id),
+			       COALESCE((SELECT result FROM driver_visits v
+			                 WHERE v.cycle_id=rc.cycle_id ORDER BY v.id DESC LIMIT 1),''),
+			       c.deposit_frozen
 			FROM reservation_cycles rc
 			JOIN keg_cycles c ON c.id=rc.cycle_id
 			JOIN kegs k ON k.id=c.keg_id
 			WHERE rc.reservation_id=$1 ORDER BY rc.cycle_id`, id)
 		cycles := scanRows(crows, func(x rowScanner) (M, error) {
 			var cid int64
-			var code, stage string
-			var scanned bool
-			if err := x.Scan(&cid, &code, &stage, &scanned); err != nil {
+			var code, stage, visit string
+			var scanned, frozen bool
+			if err := x.Scan(&cid, &code, &stage, &scanned, &visit, &frozen); err != nil {
 				return nil, err
 			}
-			return M{"cycle_id": cid, "keg_code": code, "stage": stage, "scanned": scanned}, nil
+			return M{"cycle_id": cid, "keg_code": code, "stage": stage, "scanned": scanned,
+				"visit": visit, "frozen": frozen}, nil
 		})
 		m["cycles"] = cycles
 		scanned := 0
@@ -56,6 +60,16 @@ func handleDriverTasks(w http.ResponseWriter, r *http.Request) {
 		}
 		m["scanned_count"] = scanned
 		m["missing_count"] = len(cycles) - scanned
+		// 该预约的到店记录统计（未备货/到店失败分别计入责任）
+		var nReady, nNotReady, nFailed int
+		_ = db.QueryRow(`SELECT
+			count(*) FILTER (WHERE result='READY'),
+			count(*) FILTER (WHERE result='BAR_NOT_READY'),
+			count(*) FILTER (WHERE result='DRIVER_FAILED')
+			FROM driver_visits WHERE reservation_id=$1`, id).Scan(&nReady, &nNotReady, &nFailed)
+		m["visit_ready"] = nReady
+		m["visit_not_ready"] = nNotReady
+		m["visit_failed"] = nFailed
 		return m, nil
 	})
 	writeOK(w, M{"tasks": list})

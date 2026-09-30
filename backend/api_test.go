@@ -378,3 +378,227 @@ func TestRegisterKegsNumbering(t *testing.T) {
 		}
 	}
 }
+
+// 空桶逾期押金冻结全流程：冻结 → 提醒 → 现场照片 → 到店记录 → 店长确认回收时间
+// → 逾期责任确认 → 押金释放时间重新计算
+func TestOverdueFreezeFlow(t *testing.T) {
+	if err := resetTestDB(); err != nil {
+		t.Fatal(err)
+	}
+	admin := login(t, "admin")
+	finance := login(t, "finance")
+	bar1 := login(t, "bar1")
+	bar2 := login(t, "bar2")
+	driver1 := login(t, "driver1")
+
+	// 1) 平台逾期扫描：种子已冻结 905/906/907；KEG-0008(908) 同样逾期，本次被冻结
+	code, d := doJSON(t, "POST", "/api/overdue/scan", finance, M{})
+	mustOK(t, code, d, "逾期扫描")
+	var f908 bool
+	for _, x := range d["frozen"].([]interface{}) {
+		m := x.(map[string]interface{})
+		if m["cycle_id"].(float64) == 908 {
+			f908 = true
+		}
+	}
+	if !f908 {
+		t.Fatalf("KEG-0008(cycle 908) 账期 2026-09-15 已逾期，应被冻结: %v", d["frozen"])
+	}
+	if d["frozen_count"].(float64) < 1 {
+		t.Fatalf("本次扫描应至少冻结 1 只: %v", d)
+	}
+	// 重复扫描不会重复冻结
+	code, d = doJSON(t, "POST", "/api/overdue/scan", finance, M{"cycle_ids": []int64{908}})
+	mustOK(t, code, d, "重复扫描")
+	if d["frozen_count"].(float64) != 0 {
+		t.Fatalf("已冻结桶不应重复冻结: %v", d)
+	}
+
+	// 2) 店长收到冻结提醒；跨店不可见
+	code, d = doJSON(t, "GET", "/api/bar/alerts", bar2, nil)
+	mustOK(t, code, d, "店长提醒")
+	if d["unacked_count"].(float64) == 0 {
+		t.Fatalf("醉猫酒馆应有未确认逾期提醒")
+	}
+	var saw908Alert bool
+	for _, x := range d["alerts"].([]interface{}) {
+		m := x.(map[string]interface{})
+		if m["cycle_id"].(float64) == 908 && m["kind"] == "OVERDUE_FREEZE" {
+			saw908Alert = true
+		}
+	}
+	if !saw908Alert {
+		t.Fatalf("KEG-0008 冻结后应生成店长提醒")
+	}
+	_, d1 := doJSON(t, "GET", "/api/bar/alerts", bar1, nil)
+	for _, x := range d1["alerts"].([]interface{}) {
+		if x.(map[string]interface{})["cycle_id"].(float64) == 908 {
+			t.Fatalf("泡沫实验室不应看到醉猫酒馆的冻结提醒")
+		}
+	}
+
+	// 3) 冻结桶 908 必须走"确认回收时间"：先打空
+	code, _ = doJSON(t, "POST", "/api/cycles/feedback/908", bar2, M{"pour_speed": "正常"})
+	if code != 200 {
+		t.Fatalf("908 首次反馈应自动开桶, 实际 %d", code)
+	}
+	code, d = doJSON(t, "POST", "/api/cycles/empty/908", bar2, nil)
+	mustOK(t, code, d, "908 标记打空")
+	// 普通预约对冻结桶关闭
+	code, d = doJSON(t, "POST", "/api/cycles/reserve", bar2,
+		M{"cycle_ids": []int64{908}, "pickup_date": "2026-10-02"})
+	if code != 400 {
+		t.Fatalf("冻结桶普通预约应被引导到确认回收时间, 实际 %d %v", code, d)
+	}
+	// 店长确认回收时间
+	code, d = doJSON(t, "POST", "/api/cycles/confirm-return", bar2,
+		M{"cycle_ids": []int64{908}, "pickup_date": "2026-10-02", "note": "节后回收"})
+	mustOK(t, code, d, "确认回收时间")
+	resID := int64(d["reservation_id"].(float64))
+
+	// 4) 司机到店但酒吧未备好空桶 → 计入酒吧责任
+	code, d = doJSON(t, "POST", "/api/driver/visit", driver1,
+		M{"reservation_id": resID, "result": "BAR_NOT_READY", "note": "到店时桶还在酒头上"})
+	mustOK(t, code, d, "到店未备货登记")
+	if d["count"].(float64) != 1 {
+		t.Fatalf("应登记 1 只桶的到场记录: %v", d)
+	}
+	// 越权：店长不能登记到店
+	code, _ = doJSON(t, "POST", "/api/driver/visit", bar2,
+		M{"reservation_id": resID, "result": "BAR_NOT_READY"})
+	if code != 403 {
+		t.Fatalf("店长登记到店记录应 403, 实际 %d", code)
+	}
+	// 司机任务中可看到到场统计
+	_, dtasks := doJSON(t, "GET", "/api/driver/tasks", driver1, nil)
+	var sawVisit bool
+	for _, x := range dtasks["tasks"].([]interface{}) {
+		tk := x.(map[string]interface{})
+		if tk["reservation_id"].(float64) == float64(resID) &&
+			tk["visit_not_ready"].(float64) == 1 {
+			sawVisit = true
+		}
+	}
+	if !sawVisit {
+		t.Fatalf("司机任务应带出到店未备货统计")
+	}
+
+	// 5) 店长逾期冻结后上传"已打空但未回收"现场照片
+	const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	code, d = doJSON(t, "POST", "/api/cycles/photo/905", bar2,
+		M{"photo_data": dataURL, "note": "桶已打空放角落待回收"})
+	mustOK(t, code, d, "上传现场照片")
+	// 非冻结桶不能上传
+	code, _ = doJSON(t, "POST", "/api/cycles/photo/901", bar2, M{"photo_data": dataURL})
+	if code != 400 {
+		t.Fatalf("非冻结桶上传举证照片应 400, 实际 %d", code)
+	}
+	// 跨店上传被拒
+	code, _ = doJSON(t, "POST", "/api/cycles/photo/905", bar1, M{"photo_data": dataURL})
+	if code != 400 {
+		t.Fatalf("跨店上传照片应 400, 实际 %d", code)
+	}
+
+	// 6) 财务照片审核队列：种子 907 一张待核实 + 905 一张
+	code, q := doJSON(t, "GET", "/api/finance/photo-queue", finance, nil)
+	mustOK(t, code, q, "照片队列")
+	var p907 int64
+	pendingN := 0
+	for _, x := range q["photos"].([]interface{}) {
+		p := x.(map[string]interface{})
+		if p["status"] == "PENDING" {
+			pendingN++
+		}
+		if p["cycle_id"].(float64) == 907 && p["status"] == "PENDING" {
+			p907 = int64(p["id"].(float64))
+		}
+	}
+	if pendingN < 2 || p907 == 0 {
+		t.Fatalf("待核实照片应包含种子 907 与新上传 905: %v", q["photos"])
+	}
+	// 采信 907 的照片
+	code, d = doJSON(t, "POST", "/api/finance/photos/"+itoa(p907), finance,
+		M{"action": "approve", "note": "照片清晰可采信"})
+	mustOK(t, code, d, "采信照片")
+	// 重复审核拒绝
+	code, _ = doJSON(t, "POST", "/api/finance/photos/"+itoa(p907), finance, M{"action": "approve"})
+	if code != 400 {
+		t.Fatalf("照片重复审核应 400, 实际 %d", code)
+	}
+
+	// 7) 907：司机到店失败 + 照片采信 → 自动判定酒吧无责，押金即时可释放
+	code, d = doJSON(t, "POST", "/api/finance/liability/907", finance, M{})
+	mustOK(t, code, d, "907 责任自动判定")
+	if d["party"] != "NONE" {
+		t.Fatalf("907 有司机到店失败且无未备货记录、照片已采信，应判酒吧无责: %v", d)
+	}
+	if d["release_due_date"].(string) != "2026-09-30" {
+		t.Fatalf("酒吧无责时释放日应为当天(2026-09-30): %v", d["release_due_date"])
+	}
+	code, d = doJSON(t, "POST", "/api/finance/settle/907", finance, M{"action": "release"})
+	mustOK(t, code, d, "907 当日释放押金")
+
+	// 8) 908：到店未备货 → 酒吧责任，释放日 = 确认取桶日(10-02)+7 天
+	code, d = doJSON(t, "POST", "/api/finance/liability/908", finance, M{})
+	mustOK(t, code, d, "908 责任自动判定")
+	if d["party"] != "BAR" {
+		t.Fatalf("908 有到店未备货记录，应判酒吧责任: %v", d)
+	}
+	if d["release_due_date"].(string) != "2026-10-09" {
+		t.Fatalf("酒吧责任时释放日应为取桶日+7 天 2026-10-09: %v", d["release_due_date"])
+	}
+	// 未到新释放日不能全额释放
+	code, d = doJSON(t, "POST", "/api/finance/settle/908", finance, M{"action": "release"})
+	if code != 400 {
+		t.Fatalf("未到重算后的释放日应拒绝释放, 实际 %d %v", code, d)
+	}
+	// 部分扣款不受释放日限制
+	code, d = doJSON(t, "POST", "/api/finance/settle/908", finance,
+		M{"action": "partial", "deduct_amount": 100, "reason": "逾期未备货"})
+	mustOK(t, code, d, "908 部分扣款")
+
+	// 9) 重复责任确认被拒；非法责任方被拒
+	code, _ = doJSON(t, "POST", "/api/finance/liability/907", finance, M{})
+	if code != 400 {
+		t.Fatalf("重复责任确认应 400, 实际 %d", code)
+	}
+	code, _ = doJSON(t, "POST", "/api/finance/liability/906", finance, M{"party": "WHO"})
+	if code != 400 {
+		t.Fatalf("非法责任方应 400, 实际 %d", code)
+	}
+	// 906：种子里到店未备货 1 次 → 酒吧责任
+	code, d = doJSON(t, "POST", "/api/finance/liability/906", finance, M{})
+	mustOK(t, code, d, "906 责任判定")
+	if d["party"] != "BAR" {
+		t.Fatalf("906 司机到店未备货，应判酒吧责任: %v", d)
+	}
+
+	// 10) 店长收到责任结果通知
+	_, d = doJSON(t, "GET", "/api/bar/alerts", bar2, nil)
+	var liabN int
+	var ackID int64
+	for _, x := range d["alerts"].([]interface{}) {
+		m := x.(map[string]interface{})
+		if m["kind"] == "LIABILITY_RESULT" {
+			liabN++
+			ackID = int64(m["id"].(float64))
+		}
+	}
+	if liabN < 2 {
+		t.Fatalf("907/908 责任确认后应至少生成 2 条责任结果提醒, 实际 %d", liabN)
+	}
+	// 跨店不能确认提醒
+	code, _ = doJSON(t, "POST", "/api/bar/alerts/ack/"+itoa(ackID), bar1, nil)
+	if code != 400 {
+		t.Fatalf("跨店确认提醒应 400, 实际 %d", code)
+	}
+	code, d = doJSON(t, "POST", "/api/bar/alerts/ack/"+itoa(ackID), bar2, nil)
+	mustOK(t, code, d, "本店确认提醒")
+
+	// 11) 财务列表冻结筛选与汇总
+	code, d = doJSON(t, "GET", "/api/finance/deposits?frozen=1", admin, nil)
+	mustOK(t, code, d, "冻结筛选")
+	if d["summary"].(map[string]interface{})["frozen_count"].(float64) < 1 {
+		t.Fatalf("仍应有未解除的冻结桶（如 906）: %v", d["summary"])
+	}
+}

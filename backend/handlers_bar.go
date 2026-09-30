@@ -18,7 +18,14 @@ func handleBarCycles(w http.ResponseWriter, r *http.Request) {
 		SELECT c.id, k.keg_code, k.capacity_liters, be.style, be.name, ba.batch_no, ba.status,
 		       c.stage, c.deposit_amount, c.deposit_due_date, c.tapped_at, c.emptied_at,
 		       c.deposit_status, c.late_return, c.missing_scan, c.lost,
-		       (CURRENT_DATE > c.deposit_due_date AND c.stage NOT IN ('WASHED','FAILED')) AS overdue
+		       (CURRENT_DATE > c.deposit_due_date AND c.stage NOT IN ('WASHED','FAILED')) AS overdue,
+		       c.deposit_frozen, COALESCE(c.liability_party,''),
+		       COALESCE(text(c.release_due_date),''), c.bar_not_ready_count, c.driver_fail_count,
+		       c.return_confirmed_at IS NOT NULL,
+		       (SELECT count(*) FROM empty_photos p WHERE p.cycle_id=c.id),
+		       (SELECT count(*) FROM empty_photos p WHERE p.cycle_id=c.id AND p.status='PENDING'),
+		       (SELECT count(*) FROM empty_photos p WHERE p.cycle_id=c.id AND p.status='APPROVED'),
+		       (SELECT COALESCE(string_agg(result,','),'') FROM driver_visits v WHERE v.cycle_id=c.id)
 		FROM keg_cycles c
 		JOIN kegs k ON k.id=c.keg_id
 		JOIN batches ba ON ba.id=c.batch_id
@@ -32,13 +39,17 @@ func handleBarCycles(w http.ResponseWriter, r *http.Request) {
 	list := scanRows(rows, func(rs rowScanner) (M, error) {
 		var id int64
 		var code, style, beer, batchNo, batchStatus, stage, depositStatus string
+		var liability, releaseDue, visits string
 		var capacity, deposit float64
 		var due sql.NullTime
 		var tapped, emptied sql.NullTime
-		var late, missing, lost, overdue bool
+		var late, missing, lost, overdue, frozen, returnConfirmed bool
+		var notReady, driverFail, photoN, photoPending, photoApproved int64
 		if err := rs.Scan(&id, &code, &capacity, &style, &beer, &batchNo, &batchStatus,
 			&stage, &deposit, &due, &tapped, &emptied, &depositStatus,
-			&late, &missing, &lost, &overdue); err != nil {
+			&late, &missing, &lost, &overdue,
+			&frozen, &liability, &releaseDue, &notReady, &driverFail, &returnConfirmed,
+			&photoN, &photoPending, &photoApproved, &visits); err != nil {
 			return nil, err
 		}
 		return M{"cycle_id": id, "keg_code": code, "capacity_liters": capacity,
@@ -46,7 +57,12 @@ func handleBarCycles(w http.ResponseWriter, r *http.Request) {
 			"stage": stage, "deposit_amount": deposit, "deposit_due_date": dateStr(due),
 			"tapped_at": tsStr(tapped), "emptied_at": tsStr(emptied),
 			"deposit_status": depositStatus, "late_return": late, "missing_scan": missing,
-			"lost": lost, "overdue": overdue}, nil
+			"lost": lost, "overdue": overdue,
+			"deposit_frozen": frozen, "liability_party": liability, "release_due_date": releaseDue,
+			"bar_not_ready_count": notReady, "driver_fail_count": driverFail,
+			"return_confirmed": returnConfirmed,
+			"photo_count":      photoN, "photo_pending": photoPending, "photo_approved": photoApproved,
+			"visits": visits}, nil
 	})
 	writeOK(w, M{"cycles": list, "bar_id": barID})
 }
@@ -192,8 +208,9 @@ func handleReserveReturn(w http.ResponseWriter, r *http.Request) {
 		for _, cid := range req.CycleIDs {
 			var cBar int64
 			var stage string
-			if err := tx.QueryRow(`SELECT bar_id, stage FROM keg_cycles WHERE id=$1 FOR UPDATE`, cid).
-				Scan(&cBar, &stage); err != nil {
+			var frozen bool
+			if err := tx.QueryRow(`SELECT bar_id, stage, deposit_frozen FROM keg_cycles WHERE id=$1 FOR UPDATE`, cid).
+				Scan(&cBar, &stage, &frozen); err != nil {
 				return errBad("流转记录不存在")
 			}
 			if u.Role != "admin" && cBar != u.OrgID {
@@ -201,6 +218,9 @@ func handleReserveReturn(w http.ResponseWriter, r *http.Request) {
 			}
 			if stage != "EMPTY" {
 				return errBad("仅已打空的酒桶可预约回收")
+			}
+			if frozen {
+				return errBad("该桶押金已逾期冻结，请使用“确认回收时间”重新排期")
 			}
 			barID = cBar
 		}

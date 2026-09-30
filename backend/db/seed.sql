@@ -206,4 +206,56 @@ INSERT INTO keg_events (keg_id,cycle_id,event_type,detail,actor)
 SELECT keg_id,id,'DEPOSIT_SETTLED',jsonb_build_object('status',deposit_status,'released',released_amount,'deducted',deducted_amount),'财务'
 FROM keg_cycles WHERE deposit_status<>'HELD';
 
+-- ---------- 空桶逾期押金冻结场景（醉猫酒馆 502 单，账期至 2026-09-15，今日 2026-09-30 已逾期 15 天） ----------
+-- 905 KEG-0005 世涛：仍在酒头上（TAPPED，有口味投诉），未打空 → 平台按桶冻结，提醒店长尽快打空并预约回收
+-- 906 KEG-0006 IPA：未打空；9-20 司机按预约到店时空桶未备好（BAR_NOT_READY）→ 责任倾向酒吧
+-- 907 KEG-0007 IPA：账期内（9-16）已打空；9-22 司机到店失败未能回收（DRIVER_FAILED），
+--                   店长 9-25 上传"已打空但未回收"现场照片待财务核实 → 责任倾向酒吧无责
+UPDATE keg_cycles SET deposit_frozen=TRUE, frozen_at='2026-09-30 09:00+08', late_return=TRUE
+WHERE id IN (905,906,907);
+UPDATE keg_cycles SET bar_not_ready_count=1 WHERE id=906;
+UPDATE keg_cycles SET driver_fail_count=1 WHERE id=907;
+
+INSERT INTO deposit_freezes (id,cycle_id,keg_id,bar_id,deposit_amount,original_due_date,overdue_days,status) VALUES
+ (951,905,5,5,700,'2026-09-15',15,'FROZEN'),
+ (952,906,6,5,700,'2026-09-15',15,'FROZEN'),
+ (953,907,7,5,700,'2026-09-15',15,'FROZEN');
+SELECT setval(pg_get_serial_sequence('deposit_freezes','id'), 960);
+
+-- 9-20 回收预约（最终未完成回收，MISSED）：司机到店但 906 未备好空桶
+INSERT INTO return_reservations (id,cycle_id,bar_id,pickup_date,empty_count,note,status) VALUES
+ (805,906,5,'2026-09-20',2,'9-20 到店：KEG-0006 还在酒头上未打空；KEG-0007 已备好','MISSED');
+INSERT INTO reservation_cycles (reservation_id, cycle_id) VALUES (805,906),(805,907);
+
+INSERT INTO driver_visits (reservation_id,cycle_id,driver_id,bar_id,city_id,result,note,arrived_at) VALUES
+ (805,906,1,5,1,'BAR_NOT_READY','到店时 KEG-0006 仍在酒头上，酒吧未备好空桶','2026-09-20 10:05+08'),
+ (805,907,1,5,1,'DRIVER_FAILED','KEG-0007 已打空备好，但司机车辆故障当日未能拉走，需改期','2026-09-22 09:30+08');
+
+-- 店长逾期冻结后上传的"已打空但未回收"现场照片（待财务核实）
+INSERT INTO empty_photos (cycle_id,bar_id,photo_data,note,status) VALUES
+ (907,5,
+  'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240"><rect width="320" height="240" fill="%23f4f1ea"/><rect x="90" y="60" width="140" height="130" rx="14" fill="%23c9d8e3" stroke="%238aa" stroke-width="3"/><circle cx="160" cy="120" r="30" fill="%23f4f1ea"/><text x="160" y="220" font-size="14" text-anchor="middle" fill="%23666">KEG-0007 已打空待回收 2026-09-25</text></svg>',
+  '桶已打空静置店内角落，9-22 司机车辆故障未拉走，申请免除逾期责任','PENDING');
+
+-- 店长提醒：冻结通知 + 两类到场结果
+INSERT INTO bar_alerts (bar_id,kind,cycle_id,ref_id,title,body) VALUES
+ (5,'OVERDUE_FREEZE',905,951,'空桶逾期：KEG-0005 押金已被平台冻结',
+  '该桶已超过约定归还日 2026-09-15（逾期 15 天），平台已按桶编号冻结押金 ¥700。请尽快打空并在"我的在店桶"中确认回收时间。'),
+ (5,'OVERDUE_FREEZE',906,952,'空桶逾期：KEG-0006 押金已被平台冻结',
+  '该桶已逾期 15 天且 9-20 司机到店时仍未备好空桶，到场记录会影响逾期责任判定，押金 ¥700 已冻结。'),
+ (5,'RETURN_REMINDER',906,NULL,'司机已到店但空桶未备好：KEG-0006',
+  '司机按预约到店回收时该桶尚未打空备好，本次到场记录计入酒吧方逾期责任，请尽快打空并重新确认回收时间。'),
+ (5,'OVERDUE_FREEZE',907,953,'空桶逾期：KEG-0007 押金已被平台冻结',
+  '该桶已逾期 15 天，押金 ¥700 已冻结。系统记录到 9-22 司机到店失败，您上传的打空现场照片核实后将作为免责依据。'),
+ (5,'RETURN_REMINDER',907,NULL,'司机到店失败，回收需改期：KEG-0007',
+  '司机本次因车辆故障未能到店完成回收，该到场记录作为酒吧方免责依据；请重新确认回收时间，押金冻结责任将据此判定。');
+
+INSERT INTO keg_events (keg_id,cycle_id,event_type,detail,actor) VALUES
+ (5,905,'DEPOSIT_FROZEN',jsonb_build_object('freeze_id',951,'original_due_date','2026-09-15','overdue_days',15),'平台'),
+ (6,906,'DEPOSIT_FROZEN',jsonb_build_object('freeze_id',952,'original_due_date','2026-09-15','overdue_days',15),'平台'),
+ (7,907,'DEPOSIT_FROZEN',jsonb_build_object('freeze_id',953,'original_due_date','2026-09-15','overdue_days',15),'平台'),
+ (6,906,'VISIT_BAR_NOT_READY',jsonb_build_object('reservation_id',805),'司机'),
+ (7,907,'VISIT_DRIVER_FAILED',jsonb_build_object('reservation_id',805,'note','车辆故障'),'司机'),
+ (7,907,'EMPTY_PHOTO_UPLOADED',jsonb_build_object('note','桶已打空待回收'),'酒吧');
+
 COMMIT;
